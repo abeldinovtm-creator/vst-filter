@@ -67,7 +67,7 @@ private:
     class BuilderThread : public juce::Thread
     {
     public:
-        explicit BuilderThread (LinearPhaseEQ& o) : juce::Thread ("FabEQ IR Builder"), owner (o) {}
+        explicit BuilderThread (LinearPhaseEQ& o) : juce::Thread ("EQ IR Builder"), owner (o) {}
         void run() override
         {
             while (! threadShouldExit())

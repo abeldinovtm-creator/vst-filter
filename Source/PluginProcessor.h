@@ -34,11 +34,11 @@ inline FilterType filterTypeFromIndex (int type)
     }
 }
 
-class FabEQAudioProcessor : public juce::AudioProcessor
+class EQAudioProcessor : public juce::AudioProcessor
 {
 public:
-    FabEQAudioProcessor();
-    ~FabEQAudioProcessor() override;
+    EQAudioProcessor();
+    ~EQAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -48,7 +48,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "FabEQ"; }
+    const juce::String getName() const override { return "EQ"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -94,5 +94,5 @@ public:
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FabEQAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EQAudioProcessor)
 };

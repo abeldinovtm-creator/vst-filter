@@ -10,7 +10,7 @@
 class EQGraphComponent : public juce::Component, private juce::Timer
 {
 public:
-    explicit EQGraphComponent (FabEQAudioProcessor& p);
+    explicit EQGraphComponent (EQAudioProcessor& p);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -37,7 +37,7 @@ private:
     void drawResponseCurve (juce::Graphics& g);
     void drawBandPoints (juce::Graphics& g);
 
-    FabEQAudioProcessor& processor;
+    EQAudioProcessor& processor;
     SpectrumAnalyzer spectrum;
 
     // Кривая АЧХ считается на UI-потоке из своих собственных FilterBand, а не из
@@ -53,10 +53,10 @@ private:
     int draggingBand = -1;
 };
 
-class FabEQAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
+class EQAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
-    explicit FabEQAudioProcessorEditor (FabEQAudioProcessor&);
+    explicit EQAudioProcessorEditor (EQAudioProcessor&);
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -64,7 +64,7 @@ public:
 private:
     void timerCallback() override;
 
-    FabEQAudioProcessor& audioProcessor;
+    EQAudioProcessor& audioProcessor;
 
     EQGraphComponent graph;
 
@@ -90,5 +90,5 @@ private:
 
     void refreshAttachmentsForBand (int band);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FabEQAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EQAudioProcessorEditor)
 };

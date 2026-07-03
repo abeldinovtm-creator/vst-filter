@@ -6,7 +6,7 @@
 class SpectrumAnalyzer : public juce::Component, private juce::Timer
 {
 public:
-    explicit SpectrumAnalyzer (FabEQAudioProcessor& p) : processor (p)
+    explicit SpectrumAnalyzer (EQAudioProcessor& p) : processor (p)
     {
         startTimerHz (30);
     }
@@ -36,7 +36,7 @@ private:
 
         {
             const juce::ScopedLock lock (processor.fftLock);
-            processor.window.multiplyWithWindowingTable (processor.fftData, (size_t) FabEQAudioProcessor::fftSize);
+            processor.window.multiplyWithWindowingTable (processor.fftData, (size_t) EQAudioProcessor::fftSize);
             processor.fft.performFrequencyOnlyForwardTransform (processor.fftData);
             processor.nextFFTBlockReady.store (false);
         }
@@ -45,12 +45,12 @@ private:
         path.clear();
 
         const auto sr = processor.currentSampleRate;
-        const int numBins = FabEQAudioProcessor::fftSize / 2;
+        const int numBins = EQAudioProcessor::fftSize / 2;
         bool started = false;
 
         for (int i = 1; i < numBins; ++i)
         {
-            float freq = (float) (i * sr / FabEQAudioProcessor::fftSize);
+            float freq = (float) (i * sr / EQAudioProcessor::fftSize);
             if (freq < 20.0f || freq > 20000.0f)
                 continue;
 
@@ -69,6 +69,6 @@ private:
         repaint();
     }
 
-    FabEQAudioProcessor& processor;
+    EQAudioProcessor& processor;
     juce::Path path;
 };

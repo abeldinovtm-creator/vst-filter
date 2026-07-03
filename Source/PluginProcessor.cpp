@@ -7,7 +7,7 @@ namespace
     constexpr float defaultFreqs[numBands] = { 60.f, 150.f, 400.f, 1000.f, 2500.f, 6000.f, 10000.f, 15000.f };
 }
 
-FabEQAudioProcessor::FabEQAudioProcessor()
+EQAudioProcessor::EQAudioProcessor()
     : AudioProcessor (BusesProperties()
                         .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -15,12 +15,12 @@ FabEQAudioProcessor::FabEQAudioProcessor()
 {
 }
 
-FabEQAudioProcessor::~FabEQAudioProcessor()
+EQAudioProcessor::~EQAudioProcessor()
 {
     linearPhaseEQ.stopBackgroundThread();
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout FabEQAudioProcessor::createParameterLayout()
+juce::AudioProcessorValueTreeState::ParameterLayout EQAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
@@ -65,7 +65,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout FabEQAudioProcessor::createP
     return { params.begin(), params.end() };
 }
 
-void FabEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
 
@@ -92,13 +92,13 @@ void FabEQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     fifoIndex = 0;
 }
 
-bool FabEQAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool EQAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     return layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo()
         && layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
-void FabEQAudioProcessor::pushNextSampleIntoFifo (float sample)
+void EQAudioProcessor::pushNextSampleIntoFifo (float sample)
 {
     if (fifoIndex == fftSize)
     {
@@ -115,7 +115,7 @@ void FabEQAudioProcessor::pushNextSampleIntoFifo (float sample)
     fifoBuffer[fifoIndex++] = sample;
 }
 
-void FabEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -175,12 +175,12 @@ void FabEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         pushNextSampleIntoFifo (readPtr[n]);
 }
 
-FabEQAudioProcessor::PhaseMode FabEQAudioProcessor::getPhaseMode() const
+EQAudioProcessor::PhaseMode EQAudioProcessor::getPhaseMode() const
 {
     return (PhaseMode) (int) apvts.getRawParameterValue ("phase_mode")->load();
 }
 
-int FabEQAudioProcessor::getReportedLatencySamples() const
+int EQAudioProcessor::getReportedLatencySamples() const
 {
     if (getPhaseMode() != PhaseMode::Linear)
         return 0;
@@ -190,27 +190,27 @@ int FabEQAudioProcessor::getReportedLatencySamples() const
     return sizes[juce::jlimit (0, 3, qualityIndex)] / 2;
 }
 
-void FabEQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void EQAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, destData);
 }
 
-void FabEQAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void EQAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-juce::AudioProcessorEditor* FabEQAudioProcessor::createEditor()
+juce::AudioProcessorEditor* EQAudioProcessor::createEditor()
 {
-    return new FabEQAudioProcessorEditor (*this);
+    return new EQAudioProcessorEditor (*this);
 }
 
 // Точка входа для JUCE plugin wrappers (VST3/AU/Standalone)
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new FabEQAudioProcessor();
+    return new EQAudioProcessor();
 }

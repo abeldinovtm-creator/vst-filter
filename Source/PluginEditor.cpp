@@ -15,7 +15,7 @@ namespace
 
 // ============================== EQGraphComponent ==============================
 
-EQGraphComponent::EQGraphComponent (FabEQAudioProcessor& p)
+EQGraphComponent::EQGraphComponent (EQAudioProcessor& p)
     : processor (p), spectrum (p)
 {
     spectrum.setInterceptsMouseClicks (false, false);
@@ -261,9 +261,9 @@ void EQGraphComponent::mouseDoubleClick (const juce::MouseEvent& e)
     repaint();
 }
 
-// ============================== FabEQAudioProcessorEditor ==============================
+// ============================== EQAudioProcessorEditor ==============================
 
-FabEQAudioProcessorEditor::FabEQAudioProcessorEditor (FabEQAudioProcessor& p)
+EQAudioProcessorEditor::EQAudioProcessorEditor (EQAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p), graph (p)
 {
     addAndMakeVisible (graph);
@@ -312,7 +312,7 @@ FabEQAudioProcessorEditor::FabEQAudioProcessorEditor (FabEQAudioProcessor& p)
     setSize (900, 560);
 }
 
-void FabEQAudioProcessorEditor::updateLatencyLabelAndQualityVisibility()
+void EQAudioProcessorEditor::updateLatencyLabelAndQualityVisibility()
 {
     bool isLinear = phaseModeBox.getSelectedItemIndex() == 1;
     qualityBox.setVisible (isLinear);
@@ -328,12 +328,12 @@ void FabEQAudioProcessorEditor::updateLatencyLabelAndQualityVisibility()
                           juce::dontSendNotification);
 }
 
-void FabEQAudioProcessorEditor::timerCallback()
+void EQAudioProcessorEditor::timerCallback()
 {
     updateLatencyLabelAndQualityVisibility();
 }
 
-void FabEQAudioProcessorEditor::refreshAttachmentsForBand (int band)
+void EQAudioProcessorEditor::refreshAttachmentsForBand (int band)
 {
     BandParamIDs id (band);
     freqAttach.reset();
@@ -354,7 +354,7 @@ void FabEQAudioProcessorEditor::refreshAttachmentsForBand (int band)
     updateQVsSlopeVisibility();
 }
 
-void FabEQAudioProcessorEditor::updateQVsSlopeVisibility()
+void EQAudioProcessorEditor::updateQVsSlopeVisibility()
 {
     int type = typeBox.getSelectedItemIndex();
     bool isCut = (type == 3 /* Low Cut */ || type == 4 /* High Cut */);
@@ -362,12 +362,12 @@ void FabEQAudioProcessorEditor::updateQVsSlopeVisibility()
     slopeSlider.setVisible (isCut);
 }
 
-void FabEQAudioProcessorEditor::paint (juce::Graphics& g)
+void EQAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff101012));
 }
 
-void FabEQAudioProcessorEditor::resized()
+void EQAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds();
     auto bottom = area.removeFromBottom (110);

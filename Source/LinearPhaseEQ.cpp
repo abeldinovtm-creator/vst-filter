@@ -117,7 +117,7 @@ void LinearPhaseEQ::rebuildKernel()
     for (int n = 0; n < N; ++n)
     {
         int srcIndex = (n + half) % N; // циклический сдвиг: центрируем и делаем причинным
-        w[n] = timeDomain[(size_t) srcIndex].real() / (float) N;
+        w[n] = timeDomain[(size_t) srcIndex].real(); // JUCE FFT::perform(inverse=true) уже делит на N
     }
 
     juce::dsp::WindowingFunction<float> window ((size_t) N, juce::dsp::WindowingFunction<float>::blackmanHarris);
