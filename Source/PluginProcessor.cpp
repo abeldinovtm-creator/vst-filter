@@ -94,7 +94,7 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     dryBuffer.setSize (2, samplesPerBlock, false, false, true);
 
-    linearPhaseDynGainSmoother.reset (sampleRate, 0.008); // ~8мс рамп
+    linearPhaseDynGainSmoother.reset (sampleRate, 0.03); // ~30мс рамп
     linearPhaseDynGainSmoother.setCurrentAndTargetValue (1.0f);
 
     for (int i = 0; i < numBands; ++i)
@@ -117,6 +117,15 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         gainSm.setCurrentAndTargetValue  (apvts.getRawParameterValue (id.gain)->load());
         qSm.setCurrentAndTargetValue     (apvts.getRawParameterValue (id.q)->load());
         orderSm.setCurrentAndTargetValue (juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f));
+
+        auto& detectorFreqSm = detectorFreqSmoothers[(size_t) i];
+        auto& detectorQSm    = detectorQSmoothers[(size_t) i];
+
+        detectorFreqSm.reset (sampleRate, detectorSmoothingSeconds);
+        detectorQSm.reset    (sampleRate, detectorSmoothingSeconds);
+
+        detectorFreqSm.setCurrentAndTargetValue (apvts.getRawParameterValue (id.freq)->load());
+        detectorQSm.setCurrentAndTargetValue    (apvts.getRawParameterValue (id.q)->load());
     }
 
     linearPhaseEQ.prepare (sampleRate, samplesPerBlock);
@@ -202,17 +211,46 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int i = 0; i < numBands; ++i)
         {
             BandParamIDs id (i);
-            auto freq = apvts.getRawParameterValue (id.freq)->load();
-            auto gain = apvts.getRawParameterValue (id.gain)->load();
-            auto q    = apvts.getRawParameterValue (id.q)->load();
             auto type = (int) apvts.getRawParameterValue (id.type)->load();
             auto en   = apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
             auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
-            float order = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
+            float rawOrder = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
 
             auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
             auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
             auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+
+            // Те же сглаженные freq/gain/q/order, что и в ZeroLatency-ветке (см.
+            // paramSmoothingSeconds в PluginProcessor.h). Без этого dynamics-детектор
+            // здесь ретюнится на новую частоту/Q мгновенно и без сглаживания, а его
+            // огибающая теперь идёт в общий постфактум-гейн на весь микс (см. ниже),
+            // так что даже короткий transient от ретюна детектора слышен на всей
+            // фонограмме, а не только в узкой полосе band'а.
+            auto& freqSm  = freqSmoothers[(size_t) i];
+            auto& gainSm  = gainSmoothers[(size_t) i];
+            auto& qSm     = qSmoothers[(size_t) i];
+            auto& orderSm = orderSmoothers[(size_t) i];
+
+            freqSm.setTargetValue  (apvts.getRawParameterValue (id.freq)->load());
+            gainSm.setTargetValue  (apvts.getRawParameterValue (id.gain)->load());
+            qSm.setTargetValue     (apvts.getRawParameterValue (id.q)->load());
+            orderSm.setTargetValue (rawOrder);
+
+            float freq  = freqSm.skip (totalNumSamples);
+            float gain  = gainSm.skip (totalNumSamples);
+            float q     = qSm.skip (totalNumSamples);
+            float order = orderSm.skip (totalNumSamples);
+
+            // Детектор dynamics намеренно следует за freq/q гораздо медленнее
+            // основного фильтра (см. detectorSmoothingSeconds) — иначе при
+            // перетаскивании точки в графике он мгновенно ретюнится вслед за
+            // курсором и "подхватывает" по пути громкие соседние частоты.
+            auto& detectorFreqSm = detectorFreqSmoothers[(size_t) i];
+            auto& detectorQSm    = detectorQSmoothers[(size_t) i];
+            detectorFreqSm.setTargetValue (apvts.getRawParameterValue (id.freq)->load());
+            detectorQSm.setTargetValue    (apvts.getRawParameterValue (id.q)->load());
+            float detectorFreq = detectorFreqSm.skip (totalNumSamples);
+            float detectorQ    = detectorQSm.skip (totalNumSamples);
 
             FilterType ft = filterTypeFromIndex (type);
 
@@ -221,7 +259,7 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             band.setDynamicsParameters (dynEnabled, dynThreshold, dynRange);
             band.setParameters (ft, freq, gain, q, order);
 
-            float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate);
+            float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate, detectorFreq, detectorQ);
             currentDynGainOffsetDb[(size_t) i].store (dynOffset);
 
             if (en)
@@ -291,6 +329,16 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                 float q     = qSm.skip (len);
                 float order = orderSm.skip (len);
 
+                // Детектор dynamics следует за freq/q медленнее основного фильтра
+                // (см. detectorSmoothingSeconds) — тот же resон, что и в Linear
+                // Phase-ветке, хоть здесь эффект и локален для полосы.
+                auto& detectorFreqSm = detectorFreqSmoothers[(size_t) i];
+                auto& detectorQSm    = detectorQSmoothers[(size_t) i];
+                detectorFreqSm.setTargetValue (apvts.getRawParameterValue (id.freq)->load());
+                detectorQSm.setTargetValue    (apvts.getRawParameterValue (id.q)->load());
+                float detectorFreq = detectorFreqSm.skip (len);
+                float detectorQ    = detectorQSm.skip (len);
+
                 FilterType ft = filterTypeFromIndex (type);
 
                 auto& band = bandsLeftRight[(size_t) i];
@@ -298,7 +346,7 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                 band.setDynamicsParameters (dynEnabled, dynThreshold, dynRange);
                 band.setParameters (ft, freq, gain, q, order);
 
-                float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate);
+                float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate, detectorFreq, detectorQ);
                 currentDynGainOffsetDb[(size_t) i].store (dynOffset);
 
                 band.setParameters (ft, freq, gain + dynOffset, q, order);

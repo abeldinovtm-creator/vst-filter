@@ -38,9 +38,15 @@ public:
     // ---- Dynamic EQ ----
     void setDynamicsParameters (bool enabled, float thresholdDb, float rangeDb);
 
-    // Детектирует уровень сигнала в полосе (bandpass на freq/q) и возвращает
-    // поправку к gain в дБ (0, если dynamics выключен или диапазон не задан).
-    float computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sampleRate);
+    // Детектирует уровень сигнала в полосе (bandpass на detectorFreq/detectorQ) и
+    // возвращает поправку к gain в дБ (0, если dynamics выключен или диапазон не
+    // задан). detectorFreq/detectorQ передаются отдельно от freq/q самой полосы
+    // (не берутся из this->freq/this->q) специально: вызывающий код сглаживает
+    // их гораздо медленнее, чем основной фильтр — иначе при перетаскивании точки
+    // в графике детектор мгновенно ретюнится вслед за курсором и "подхватывает"
+    // громкие соседние частоты, дёргая огибающую и, соответственно, гейн.
+    float computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sampleRate,
+                                       float detectorFreq, float detectorQ);
 
     bool enabled = true;
 

@@ -5,7 +5,10 @@ void LinearPhaseEQ::setQuality (int qualityIndex)
     static constexpr int sizes[4] = { 1024, 2048, 4096, 8192 };
     pendingFftSize = sizes[juce::jlimit (0, 3, qualityIndex)];
     if (pendingFftSize != currentFftSize)
+    {
         dirty.store (true);
+        lastSnapshotChangeMs.store (juce::Time::getMillisecondCounterHiRes());
+    }
 }
 
 void LinearPhaseEQ::prepare (double sr, int maximumBlockSize)
@@ -53,12 +56,22 @@ void LinearPhaseEQ::updateBandSnapshot (const std::array<BandSnapshot, numBands>
     }
 
     if (changed)
+    {
         dirty.store (true);
+        lastSnapshotChangeMs.store (juce::Time::getMillisecondCounterHiRes());
+    }
 }
 
 void LinearPhaseEQ::rebuildKernelIfDirty()
 {
     if (! dirty.load())
+        return;
+
+    // Пока изменения продолжают поступать чаще, чем раз в kernelSettleMs, не
+    // трогаем текущий (стабильный) kernel вообще — см. комментарий у
+    // lastSnapshotChangeMs в LinearPhaseEQ.h.
+    double sinceChangeMs = juce::Time::getMillisecondCounterHiRes() - lastSnapshotChangeMs.load();
+    if (sinceChangeMs < kernelSettleMs)
         return;
 
     currentFftSize = pendingFftSize;

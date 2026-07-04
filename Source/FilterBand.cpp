@@ -221,7 +221,8 @@ void FilterBand::setDynamicsParameters (bool dynamicsEnabled, float thresholdDb,
     dynRange = rangeDb;
 }
 
-float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sr)
+float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sr,
+                                               float detectorFreqHz, float detectorQIn)
 {
     if (! dynEnabled || dynRange == 0.0f)
         return 0.0f;
@@ -246,11 +247,12 @@ float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const
         detectorScratch[n] = sum / (float) numChannels;
     }
 
-    float detectorQ = juce::jmax (q, 0.3f);
-    if (! detectorCoeffsValid || std::abs (freq - lastDetectorFreq) > 0.01f || std::abs (detectorQ - lastDetectorQ) > 0.0001f)
+    float detectorFreq = juce::jlimit (10.0f, 22000.0f, detectorFreqHz);
+    float detectorQ = juce::jmax (detectorQIn, 0.3f);
+    if (! detectorCoeffsValid || std::abs (detectorFreq - lastDetectorFreq) > 0.01f || std::abs (detectorQ - lastDetectorQ) > 0.0001f)
     {
-        detector.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sr, freq, detectorQ);
-        lastDetectorFreq = freq;
+        detector.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sr, detectorFreq, detectorQ);
+        lastDetectorFreq = detectorFreq;
         lastDetectorQ = detectorQ;
         detectorCoeffsValid = true;
     }
@@ -271,7 +273,7 @@ float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const
     // (60Hz -> 16.6мс на период), из-за чего envelope follower гонится за
     // отдельными полупериодами волны, а не за огибающей. Растягиваем attack
     // (и пропорционально release) под период частоты полосы.
-    float minAttackMs = 2000.0f / freq; // ~2 периода на частоте band
+    float minAttackMs = 2000.0f / detectorFreq; // ~2 периода на частоте детектора
     float attackMs = juce::jmax (15.0f, minAttackMs);
     float releaseMs = juce::jmax (150.0f, minAttackMs * 5.0f);
 

@@ -81,6 +81,15 @@ public:
         freqSmoothers, gainSmoothers, qSmoothers, orderSmoothers;
 
     // ---- Dynamic EQ ----
+    // Детектор dynamics отслеживает freq/q НАМНОГО медленнее, чем основной
+    // фильтр (150мс против 20мс). Иначе при перетаскивании точки в графике
+    // детектор мгновенно следует за курсором и "подхватывает" громкие соседние
+    // частоты по пути — огибающая дёргается, и слышен провал/треск ровно пока
+    // идёт перетаскивание (в Linear Phase это особенно заметно, так как
+    // dynamic-offset накладывается широкополосно на весь микс).
+    static constexpr float detectorSmoothingSeconds = 0.15f; // 150мс
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, numBands>
+        detectorFreqSmoothers, detectorQSmoothers;
     juce::AudioBuffer<float> dryBuffer;
     // Текущая поправка гейна от dynamics-детектора на каждую полосу. Читается из
     // EQGraphComponent (UI-поток) для "дышащей" кривой без гонки с аудио-потоком.
