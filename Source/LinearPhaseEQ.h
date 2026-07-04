@@ -52,7 +52,15 @@ private:
     void rebuildKernelIfDirty();
     void rebuildKernel();
 
-    juce::dsp::Convolution convolution { juce::dsp::Convolution::NonUniform { 512 } };
+    // Явная общая очередь для конвольвера: loadImpulseResponse() вызывается из
+    // BuilderThread, а process() — из аудио-потока. ConvolutionMessageQueue
+    // держит собственный фоновый поток (стартует в своём конструкторе) и
+    // безопасно синхронизирует смену IR с process(), поэтому нельзя просто
+    // положиться на "работает и так" — нужна именно она, а не implicit-очередь,
+    // которую Convolution иначе создал бы сама неявно. Порядок объявления важен:
+    // convolutionMessageQueue должна инициализироваться раньше convolution.
+    juce::dsp::ConvolutionMessageQueue convolutionMessageQueue;
+    juce::dsp::Convolution convolution { juce::dsp::Convolution::NonUniform { 512 }, convolutionMessageQueue };
 
     double sampleRate = 44100.0;
     int currentFftSize = 4096;

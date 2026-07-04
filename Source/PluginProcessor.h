@@ -71,6 +71,15 @@ public:
     std::array<FilterBand, numBands> bandsLeftRight; // одна инстанция FilterBand обрабатывает оба канала внутри
     double currentSampleRate = 44100.0;
 
+    // Сглаживание freq/gain/q/order в ZeroLatency-режиме: без него быстрое
+    // движение ручки (или автоматизация) между суб-блоками — это мгновенная
+    // подмена коэффициентов биквада на новое значение, и слышимый треск
+    // ровно того же типа, что чинили для dynamics-огибающей, только источник
+    // скачка теперь ручной, а не envelope follower.
+    static constexpr float paramSmoothingSeconds = 0.02f; // 20мс
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>, numBands>
+        freqSmoothers, gainSmoothers, qSmoothers, orderSmoothers;
+
     // ---- Dynamic EQ ----
     juce::AudioBuffer<float> dryBuffer;
     // Текущая поправка гейна от dynamics-детектора на каждую полосу. Читается из
@@ -80,6 +89,14 @@ public:
     // ---- Linear Phase ----
     LinearPhaseEQ linearPhaseEQ;
     bool linearPhaseThreadStarted = false;
+
+    // FFT-kernel в Linear Phase строится только по статическому gain (ручки),
+    // без dynamic-offset — иначе dirty-флаг в LinearPhaseEQ триггерится почти
+    // каждый callback, пока dynamics активен, и kernel пересобирается непрерывно
+    // (дорого + источник щелчков на подмене IR). Быстрая dynamics-модуляция
+    // накладывается постфактум простым смуженным гейном поверх результата
+    // свёртки — kernel остаётся стабильным, "дыхание" не трогает его вообще.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> linearPhaseDynGainSmoother;
     enum class PhaseMode { ZeroLatency = 0, Linear = 1 };
     PhaseMode getPhaseMode() const;
     int getReportedLatencySamples() const;

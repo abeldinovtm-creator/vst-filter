@@ -27,16 +27,44 @@ void FilterBand::reset()
 
     detector.reset();
     envelopeDb = -100.0f;
+
+    // Форсируем пересчёт коэффициентов на следующий setParameters/detector-update,
+    // а не оставляем кэш от предыдущей сессии prepare/reset.
+    lastFreq = -1.0f;
+    lastQ = -1.0f;
+    lastOrder = -1.0f;
+    detectorCoeffsValid = false;
+    lastDetectorFreq = -1.0f;
+    lastDetectorQ = -1.0f;
 }
 
 void FilterBand::setParameters (FilterType type, float frequencyHz, float gainDb, float qVal, float slopeOrder)
 {
+    float newFreq = juce::jlimit (10.0f, 22000.0f, frequencyHz);
+    float newQ = juce::jlimit (0.05f, 18.0f, qVal);
+    float newOrder = juce::jlimit (1.0f, 8.0f, slopeOrder);
+
+    bool changed = type != lastType
+        || std::abs (newFreq - lastFreq) > 0.01f
+        || std::abs (gainDb - lastGain) > 0.001f
+        || std::abs (newQ - lastQ) > 0.0001f
+        || std::abs (newOrder - lastOrder) > 0.0001f;
+
     currentType = type;
-    freq = juce::jlimit (10.0f, 22000.0f, frequencyHz);
+    freq = newFreq;
     gain = gainDb;
-    q = juce::jlimit (0.05f, 18.0f, qVal);
-    order = juce::jlimit (1.0f, 8.0f, slopeOrder);
-    updateCoefficients();
+    q = newQ;
+    order = newOrder;
+
+    if (changed)
+    {
+        updateCoefficients();
+        lastType = type;
+        lastFreq = newFreq;
+        lastGain = gainDb;
+        lastQ = newQ;
+        lastOrder = newOrder;
+    }
 }
 
 int FilterBand::designCutStages (FilterType type, float freq, double sampleRate, int order,
@@ -218,7 +246,14 @@ float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const
         detectorScratch[n] = sum / (float) numChannels;
     }
 
-    detector.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sr, freq, juce::jmax (q, 0.3f));
+    float detectorQ = juce::jmax (q, 0.3f);
+    if (! detectorCoeffsValid || std::abs (freq - lastDetectorFreq) > 0.01f || std::abs (detectorQ - lastDetectorQ) > 0.0001f)
+    {
+        detector.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sr, freq, detectorQ);
+        lastDetectorFreq = freq;
+        lastDetectorQ = detectorQ;
+        detectorCoeffsValid = true;
+    }
 
     double sumOfSquares = 0.0;
     for (int n = 0; n < numSamples; ++n)
@@ -231,8 +266,17 @@ float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const
     float levelDb = juce::Decibels::gainToDecibels (rms, -100.0f);
 
     double blockMs = 1000.0 * (double) numSamples / sr;
+
+    // На низких частотах период сигнала больше, чем RMS-окно/классический attack
+    // (60Hz -> 16.6мс на период), из-за чего envelope follower гонится за
+    // отдельными полупериодами волны, а не за огибающей. Растягиваем attack
+    // (и пропорционально release) под период частоты полосы.
+    float minAttackMs = 2000.0f / freq; // ~2 периода на частоте band
+    float attackMs = juce::jmax (15.0f, minAttackMs);
+    float releaseMs = juce::jmax (150.0f, minAttackMs * 5.0f);
+
     bool attacking = levelDb > envelopeDb;
-    float coeff = (float) std::exp (-blockMs / (attacking ? 15.0 : 150.0));
+    float coeff = (float) std::exp (-blockMs / (attacking ? attackMs : releaseMs));
 
     envelopeDb = coeff * envelopeDb + (1.0f - coeff) * levelDb;
 

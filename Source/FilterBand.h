@@ -73,6 +73,12 @@ private:
 
     juce::AudioBuffer<float> scratchBuffer;
 
+    // Кэш последних параметров, на которых считались коэффициенты — чтобы не
+    // делать heap allocation (Coefficients::Ptr) в audio thread на каждый
+    // dynSubBlock, если freq/gain/q/order не изменились с прошлого вызова.
+    FilterType lastType = FilterType::Bell;
+    float lastFreq = -1.0f, lastGain = 0.0f, lastQ = -1.0f, lastOrder = -1.0f;
+
     // ---- Dynamic EQ ----
     bool dynEnabled = false;
     float dynThreshold = -24.0f;
@@ -81,4 +87,7 @@ private:
     float envelopeDb = -100.0f;
     juce::HeapBlock<float> detectorScratch;
     int detectorScratchSize = 0;
+
+    bool detectorCoeffsValid = false;
+    float lastDetectorFreq = -1.0f, lastDetectorQ = -1.0f;
 };

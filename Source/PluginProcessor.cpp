@@ -94,6 +94,31 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     dryBuffer.setSize (2, samplesPerBlock, false, false, true);
 
+    linearPhaseDynGainSmoother.reset (sampleRate, 0.008); // ~8мс рамп
+    linearPhaseDynGainSmoother.setCurrentAndTargetValue (1.0f);
+
+    for (int i = 0; i < numBands; ++i)
+    {
+        BandParamIDs id (i);
+
+        auto& freqSm  = freqSmoothers[(size_t) i];
+        auto& gainSm  = gainSmoothers[(size_t) i];
+        auto& qSm     = qSmoothers[(size_t) i];
+        auto& orderSm = orderSmoothers[(size_t) i];
+
+        freqSm.reset  (sampleRate, paramSmoothingSeconds);
+        gainSm.reset  (sampleRate, paramSmoothingSeconds);
+        qSm.reset     (sampleRate, paramSmoothingSeconds);
+        orderSm.reset (sampleRate, paramSmoothingSeconds);
+
+        auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
+
+        freqSm.setCurrentAndTargetValue  (apvts.getRawParameterValue (id.freq)->load());
+        gainSm.setCurrentAndTargetValue  (apvts.getRawParameterValue (id.gain)->load());
+        qSm.setCurrentAndTargetValue     (apvts.getRawParameterValue (id.q)->load());
+        orderSm.setCurrentAndTargetValue (juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f));
+    }
+
     linearPhaseEQ.prepare (sampleRate, samplesPerBlock);
     linearPhaseEQ.setQuality ((int) apvts.getRawParameterValue ("linphase_quality")->load());
     if (! linearPhaseThreadStarted)
@@ -172,6 +197,7 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         juce::dsp::AudioBlock<const float> dryBlock (constDryBuffer);
 
         LinearPhaseEQ::BandSnapshot snapshot[numBands];
+        float totalDynOffsetDb = 0.0f;
 
         for (int i = 0; i < numBands; ++i)
         {
@@ -198,10 +224,14 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate);
             currentDynGainOffsetDb[(size_t) i].store (dynOffset);
 
-            float totalGain = gain + dynOffset;
-            band.setParameters (ft, freq, totalGain, q, order);
+            if (en)
+                totalDynOffsetDb += dynOffset;
 
-            snapshot[i] = { ft, freq, totalGain, q, en, order };
+            // Kernel строится по статическому gain (без dynOffset) — см. комментарий
+            // у linearPhaseDynGainSmoother в PluginProcessor.h. Иначе dirty-флаг в
+            // LinearPhaseEQ триггерится почти на каждый callback, пока dynamics
+            // активен, и FFT-kernel пересобирается непрерывно.
+            snapshot[i] = { ft, freq, gain, q, en, order };
         }
 
         linearPhaseEQ.setQuality ((int) apvts.getRawParameterValue ("linphase_quality")->load());
@@ -209,6 +239,12 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         for (int i = 0; i < numBands; ++i) arr[(size_t) i] = snapshot[i];
         linearPhaseEQ.updateBandSnapshot (arr);
         linearPhaseEQ.process (block);
+
+        // Быстрая dynamics-модуляция накладывается постфактум, а не запекается
+        // в kernel: суммарная поправка со всех активных полос -> смуженный
+        // scalar-гейн на весь буфер.
+        linearPhaseDynGainSmoother.setTargetValue (juce::Decibels::decibelsToGain (totalDynOffsetDb));
+        linearPhaseDynGainSmoother.applyGain (buffer, totalNumSamples);
     }
     else
     {
@@ -228,17 +264,32 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             for (int i = 0; i < numBands; ++i)
             {
                 BandParamIDs id (i);
-                auto freq = apvts.getRawParameterValue (id.freq)->load();
-                auto gain = apvts.getRawParameterValue (id.gain)->load();
-                auto q    = apvts.getRawParameterValue (id.q)->load();
                 auto type = (int) apvts.getRawParameterValue (id.type)->load();
                 auto en   = apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
                 auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
-                float order = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
+                float rawOrder = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
 
                 auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
                 auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
                 auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+
+                // Раздвигаем скачок ручного изменения ручки/автоматизации на
+                // paramSmoothingSeconds, а не применяем его как мгновенную подмену
+                // коэффициентов между суб-блоками — см. комментарий в PluginProcessor.h.
+                auto& freqSm  = freqSmoothers[(size_t) i];
+                auto& gainSm  = gainSmoothers[(size_t) i];
+                auto& qSm     = qSmoothers[(size_t) i];
+                auto& orderSm = orderSmoothers[(size_t) i];
+
+                freqSm.setTargetValue  (apvts.getRawParameterValue (id.freq)->load());
+                gainSm.setTargetValue  (apvts.getRawParameterValue (id.gain)->load());
+                qSm.setTargetValue     (apvts.getRawParameterValue (id.q)->load());
+                orderSm.setTargetValue (rawOrder);
+
+                float freq  = freqSm.skip (len);
+                float gain  = gainSm.skip (len);
+                float q     = qSm.skip (len);
+                float order = orderSm.skip (len);
 
                 FilterType ft = filterTypeFromIndex (type);
 
