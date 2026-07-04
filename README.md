@@ -92,6 +92,10 @@ EQ/
     └── SpectrumAnalyzer.h/.cpp — фоновая FFT-визуализация спектра (header-only)
 ```
 
+## Автор
+
+Tlek Abeldinov
+
 ## Что дальше можно добавить
 
 - Плавающая линия текущего значения при наведении (readout freq/gain/Q как тултип)

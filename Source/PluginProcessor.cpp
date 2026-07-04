@@ -1,5 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
+#include <cmath>
+#include <vector>
 
 namespace
 {
@@ -72,6 +75,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQAudioProcessor::createPara
         params.push_back (std::make_unique<juce::AudioParameterFloat>(
             id.dynRange, "Band " + juce::String (i + 1) + " Dyn Range",
             juce::NormalisableRange<float> (-30.0f, 30.0f, 0.1f), 0.0f));
+
+        // ---- Auto-resonance ----
+        params.push_back (std::make_unique<juce::AudioParameterBool>(
+            id.autoResonance, "Band " + juce::String (i + 1) + " Auto Resonance", false));
     }
 
     return { params.begin(), params.end() };
@@ -138,6 +145,12 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     juce::zeromem (fifoBuffer, sizeof (fifoBuffer));
     fifoIndex = 0;
+
+    juce::zeromem (resonanceFifoBuffer, sizeof (resonanceFifoBuffer));
+    resonanceFifoIndex = 0;
+    detectedResonanceCount.store (0);
+    for (auto& f : detectedResonanceFreqHz) f.store (0.0f);
+    for (auto& f : currentAutoTrackedFreq) f.store (0.0f);
 }
 
 bool EQAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -163,6 +176,109 @@ void EQAudioProcessor::pushNextSampleIntoFifo (float sample)
     fifoBuffer[fifoIndex++] = sample;
 }
 
+void EQAudioProcessor::pushNextDrySampleIntoResonanceFifo (float sample)
+{
+    if (resonanceFifoIndex == resonanceFftSize)
+    {
+        if (! nextResonanceFFTBlockReady.load())
+        {
+            const juce::ScopedLock lock (resonanceFftLock);
+            juce::zeromem (resonanceFftData, sizeof (resonanceFftData));
+            memcpy (resonanceFftData, resonanceFifoBuffer, sizeof (resonanceFifoBuffer));
+            nextResonanceFFTBlockReady.store (true);
+        }
+        resonanceFifoIndex = 0;
+    }
+
+    resonanceFifoBuffer[resonanceFifoIndex++] = sample;
+}
+
+void EQAudioProcessor::updateResonancePeaks()
+{
+    if (! nextResonanceFFTBlockReady.load())
+        return;
+
+    {
+        const juce::ScopedLock lock (resonanceFftLock);
+        resonanceWindow.multiplyWithWindowingTable (resonanceFftData, (size_t) resonanceFftSize);
+        resonanceFft.performFrequencyOnlyForwardTransform (resonanceFftData);
+        nextResonanceFFTBlockReady.store (false);
+    }
+
+    const int numBins = resonanceFftSize / 2;
+    constexpr float minFreqHz = 40.0f, maxFreqHz = 18000.0f;
+    constexpr float minProminenceDb = 6.0f;
+
+    std::vector<float> dbSpectrum ((size_t) numBins);
+    for (int i = 0; i < numBins; ++i)
+        dbSpectrum[(size_t) i] = juce::Decibels::gainToDecibels (resonanceFftData[i], -100.0f);
+
+    // Локально сглаженное среднее — приближённая "спектральная огибающая",
+    // относительно которой ищем именно ВЫСТУПАЮЩИЕ пики, а не просто самые
+    // громкие частоты (иначе на плотном миксе резонансом сочтётся весь бас).
+    int smoothRadius = juce::jmax (2, numBins / 64);
+    std::vector<float> localAvg ((size_t) numBins);
+    for (int i = 0; i < numBins; ++i)
+    {
+        int lo = juce::jmax (0, i - smoothRadius);
+        int hi = juce::jmin (numBins - 1, i + smoothRadius);
+        double sum = 0.0;
+        int count = 0;
+        for (int k = lo; k <= hi; ++k) { sum += dbSpectrum[(size_t) k]; ++count; }
+        localAvg[(size_t) i] = (float) (sum / count);
+    }
+
+    struct Candidate { float freq; float prominence; };
+    std::vector<Candidate> candidates;
+
+    for (int i = 2; i < numBins - 2; ++i)
+    {
+        float freq = (float) (i * currentSampleRate / resonanceFftSize);
+        if (freq < minFreqHz || freq > maxFreqHz)
+            continue;
+
+        bool isLocalMax = dbSpectrum[(size_t) i] > dbSpectrum[(size_t) (i - 1)]
+                         && dbSpectrum[(size_t) i] >= dbSpectrum[(size_t) (i + 1)];
+        if (! isLocalMax)
+            continue;
+
+        float prominence = dbSpectrum[(size_t) i] - localAvg[(size_t) i];
+        if (prominence < minProminenceDb)
+            continue;
+
+        candidates.push_back ({ freq, prominence });
+    }
+
+    std::sort (candidates.begin(), candidates.end(),
+              [] (const Candidate& a, const Candidate& b) { return a.prominence > b.prominence; });
+
+    // Разносим по минимальному расстоянию (~5% по частоте), чтобы не поймать
+    // соседние бины одного и того же резонанса как несколько разных.
+    std::vector<float> picked;
+    for (auto& c : candidates)
+    {
+        bool tooClose = false;
+        for (float p : picked)
+        {
+            if (std::abs (std::log (c.freq / p)) < std::log (1.05f))
+            {
+                tooClose = true;
+                break;
+            }
+        }
+
+        if (! tooClose)
+            picked.push_back (c.freq);
+
+        if ((int) picked.size() >= maxResonancePeaks)
+            break;
+    }
+
+    for (int i = 0; i < maxResonancePeaks; ++i)
+        detectedResonanceFreqHz[(size_t) i].store (i < (int) picked.size() ? picked[(size_t) i] : 0.0f);
+    detectedResonanceCount.store ((int) picked.size());
+}
+
 namespace
 {
     // Гранула обновления dynamics-детектора и коэффициентов биквадов в
@@ -179,6 +295,29 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     juce::ScopedNoDenormals noDenormals;
 
     auto totalNumSamples = buffer.getNumSamples();
+
+    // Резонансы ищем по ИСХОДНОМУ (до-EQ) сигналу, пока band'ы ещё не успели
+    // его обработать — иначе как только Auto-полоса начинает резать резонанс,
+    // он бы пропал из анализа и детектор потерял бы собственную цель.
+    {
+        auto* dryReadPtr = buffer.getReadPointer (0);
+        for (int n = 0; n < totalNumSamples; ++n)
+            pushNextDrySampleIntoResonanceFifo (dryReadPtr[n]);
+    }
+
+    // Полосы с включённым Auto разбирают найденные резонансы по порядку
+    // выраженности: первая (по индексу 0..7) Auto-полоса получает самый
+    // заметный резонанс, вторая — следующий, и т.д.
+    int autoSlotForBand[numBands];
+    {
+        int slot = 0;
+        for (int i = 0; i < numBands; ++i)
+        {
+            BandParamIDs id (i);
+            bool autoOn = apvts.getRawParameterValue (id.autoResonance)->load() > 0.5f;
+            autoSlotForBand[i] = autoOn ? slot++ : -1;
+        }
+    }
 
     auto mode = getPhaseMode();
 
@@ -216,9 +355,23 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
             float rawOrder = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
 
-            auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
-            auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
-            auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+            auto dynEnabledParam   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
+            auto dynThresholdParam = apvts.getRawParameterValue (id.dynThreshold)->load();
+            auto dynRangeParam     = apvts.getRawParameterValue (id.dynRange)->load();
+
+            // Auto: полоса сама настраивается на найденный резонанс (фиксированное
+            // узкое Q, гашение через Dynamic EQ с внутренними fixed threshold/range
+            // — см. константы autoResonance* в PluginProcessor.h). Если резонанс
+            // ещё не найден (слот пуст), не трогаем freq-таргет вообще — держим
+            // последнее известное значение вместо скачка на 0Hz.
+            bool autoOn = apvts.getRawParameterValue (id.autoResonance)->load() > 0.5f;
+            int autoSlot = autoSlotForBand[i];
+            bool autoHasTarget = autoOn && autoSlot >= 0 && autoSlot < detectedResonanceCount.load()
+                                 && detectedResonanceFreqHz[(size_t) autoSlot].load() > 0.0f;
+
+            float freqRawTarget = autoHasTarget ? detectedResonanceFreqHz[(size_t) autoSlot].load()
+                                                 : apvts.getRawParameterValue (id.freq)->load();
+            float qRawTarget = autoOn ? autoResonanceQ : apvts.getRawParameterValue (id.q)->load();
 
             // Те же сглаженные freq/gain/q/order, что и в ZeroLatency-ветке (см.
             // paramSmoothingSeconds в PluginProcessor.h). Без этого dynamics-детектор
@@ -231,9 +384,10 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             auto& qSm     = qSmoothers[(size_t) i];
             auto& orderSm = orderSmoothers[(size_t) i];
 
-            freqSm.setTargetValue  (apvts.getRawParameterValue (id.freq)->load());
+            if (autoHasTarget || ! autoOn)
+                freqSm.setTargetValue (freqRawTarget);
             gainSm.setTargetValue  (apvts.getRawParameterValue (id.gain)->load());
-            qSm.setTargetValue     (apvts.getRawParameterValue (id.q)->load());
+            qSm.setTargetValue     (qRawTarget);
             orderSm.setTargetValue (rawOrder);
 
             float freq  = freqSm.skip (totalNumSamples);
@@ -241,16 +395,23 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             float q     = qSm.skip (totalNumSamples);
             float order = orderSm.skip (totalNumSamples);
 
+            currentAutoTrackedFreq[(size_t) i].store (autoOn ? freq : 0.0f);
+
             // Детектор dynamics намеренно следует за freq/q гораздо медленнее
             // основного фильтра (см. detectorSmoothingSeconds) — иначе при
             // перетаскивании точки в графике он мгновенно ретюнится вслед за
             // курсором и "подхватывает" по пути громкие соседние частоты.
             auto& detectorFreqSm = detectorFreqSmoothers[(size_t) i];
             auto& detectorQSm    = detectorQSmoothers[(size_t) i];
-            detectorFreqSm.setTargetValue (apvts.getRawParameterValue (id.freq)->load());
-            detectorQSm.setTargetValue    (apvts.getRawParameterValue (id.q)->load());
+            if (autoHasTarget || ! autoOn)
+                detectorFreqSm.setTargetValue (freqRawTarget);
+            detectorQSm.setTargetValue (qRawTarget);
             float detectorFreq = detectorFreqSm.skip (totalNumSamples);
             float detectorQ    = detectorQSm.skip (totalNumSamples);
+
+            bool dynEnabled     = autoOn ? true : dynEnabledParam;
+            float dynThreshold  = autoOn ? autoResonanceThresholdDb : dynThresholdParam;
+            float dynRange      = autoOn ? autoResonanceRangeDb : dynRangeParam;
 
             FilterType ft = filterTypeFromIndex (type);
 
@@ -307,9 +468,21 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                 auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
                 float rawOrder = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
 
-                auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
-                auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
-                auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+                auto dynEnabledParam   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
+                auto dynThresholdParam = apvts.getRawParameterValue (id.dynThreshold)->load();
+                auto dynRangeParam     = apvts.getRawParameterValue (id.dynRange)->load();
+
+                // Auto: см. подробный комментарий в Linear Phase-ветке выше — тот же
+                // механизм (найденный резонанс -> freq/Q фиксируются, гашение через
+                // Dynamic EQ с внутренними fixed threshold/range).
+                bool autoOn = apvts.getRawParameterValue (id.autoResonance)->load() > 0.5f;
+                int autoSlot = autoSlotForBand[i];
+                bool autoHasTarget = autoOn && autoSlot >= 0 && autoSlot < detectedResonanceCount.load()
+                                     && detectedResonanceFreqHz[(size_t) autoSlot].load() > 0.0f;
+
+                float freqRawTarget = autoHasTarget ? detectedResonanceFreqHz[(size_t) autoSlot].load()
+                                                     : apvts.getRawParameterValue (id.freq)->load();
+                float qRawTarget = autoOn ? autoResonanceQ : apvts.getRawParameterValue (id.q)->load();
 
                 // Раздвигаем скачок ручного изменения ручки/автоматизации на
                 // paramSmoothingSeconds, а не применяем его как мгновенную подмену
@@ -319,9 +492,10 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                 auto& qSm     = qSmoothers[(size_t) i];
                 auto& orderSm = orderSmoothers[(size_t) i];
 
-                freqSm.setTargetValue  (apvts.getRawParameterValue (id.freq)->load());
+                if (autoHasTarget || ! autoOn)
+                    freqSm.setTargetValue (freqRawTarget);
                 gainSm.setTargetValue  (apvts.getRawParameterValue (id.gain)->load());
-                qSm.setTargetValue     (apvts.getRawParameterValue (id.q)->load());
+                qSm.setTargetValue     (qRawTarget);
                 orderSm.setTargetValue (rawOrder);
 
                 float freq  = freqSm.skip (len);
@@ -329,15 +503,22 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                 float q     = qSm.skip (len);
                 float order = orderSm.skip (len);
 
+                currentAutoTrackedFreq[(size_t) i].store (autoOn ? freq : 0.0f);
+
                 // Детектор dynamics следует за freq/q медленнее основного фильтра
                 // (см. detectorSmoothingSeconds) — тот же resон, что и в Linear
                 // Phase-ветке, хоть здесь эффект и локален для полосы.
                 auto& detectorFreqSm = detectorFreqSmoothers[(size_t) i];
                 auto& detectorQSm    = detectorQSmoothers[(size_t) i];
-                detectorFreqSm.setTargetValue (apvts.getRawParameterValue (id.freq)->load());
-                detectorQSm.setTargetValue    (apvts.getRawParameterValue (id.q)->load());
+                if (autoHasTarget || ! autoOn)
+                    detectorFreqSm.setTargetValue (freqRawTarget);
+                detectorQSm.setTargetValue (qRawTarget);
                 float detectorFreq = detectorFreqSm.skip (len);
                 float detectorQ    = detectorQSm.skip (len);
+
+                bool dynEnabled    = autoOn ? true : dynEnabledParam;
+                float dynThreshold = autoOn ? autoResonanceThresholdDb : dynThresholdParam;
+                float dynRange     = autoOn ? autoResonanceRangeDb : dynRangeParam;
 
                 FilterType ft = filterTypeFromIndex (type);
 

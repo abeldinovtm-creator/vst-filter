@@ -14,6 +14,10 @@ namespace FabColours
     // кривой подсвечивается золотым, даккинг — холодным синим (контраст к kGold/kAccent).
     static constexpr juce::uint32 kDynBoost = kGold;
     static constexpr juce::uint32 kDynCut   = 0xff4aa8e8;
+
+    // Маркеры авто-найденных резонансов на графике — тревожный красно-оранжевый,
+    // чтобы явно отличаться от кривой/точек полос.
+    static constexpr juce::uint32 kResonance = 0xffff5a3c;
 }
 
 /** Тёмная тема с коралловым акцентом: кастомные ручки и тумблеры. */
@@ -52,7 +56,7 @@ public:
     std::function<void(int)> onBandSelected;
 
 private:
-    void timerCallback() override { repaint(); }
+    void timerCallback() override { processor.updateResonancePeaks(); repaint(); }
 
     float xToFreq (float x) const;
     float freqToX (float freq) const;
@@ -64,6 +68,12 @@ private:
     void drawDynamicsOverlay (juce::Graphics& g);
     void drawResponseCurve (juce::Graphics& g);
     void drawBandPoints (juce::Graphics& g);
+    void drawResonanceMarkers (juce::Graphics& g);
+
+    // Рабочая частота полосы для отображения: если у полосы включён Auto, ручной
+    // freq-параметр игнорируется движком, и точку/кривую нужно рисовать по
+    // processor.currentAutoTrackedFreq, а не по APVTS-параметру.
+    float displayFreqForBand (int bandIndex) const;
 
     EQAudioProcessor& processor;
     SpectrumAnalyzer spectrum;
@@ -114,11 +124,15 @@ private:
     juce::Slider dynThresholdSlider, dynRangeSlider;
     juce::Label dynThresholdLabel { {}, "Threshold" }, dynRangeLabel { {}, "Range" };
 
+    // Auto: полоса сама находит и гасит резонанс (см. EQAudioProcessor::updateResonancePeaks)
+    juce::ToggleButton autoResonanceToggle { "Auto" };
+
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freqAttach, gainAttach, qAttach, slopeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> typeAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> dynEnabledAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dynThresholdAttach, dynRangeAttach;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoResonanceAttach;
 
     // Q используется всеми типами, кроме Low Cut/High Cut, для которых вместо
     // резонанса показывается выбор крутизны ската (12/24/48 dB/oct).
@@ -129,6 +143,9 @@ private:
     juce::Label phaseModeLabel { {}, "Phase" }, qualityLabel { {}, "Quality" }, latencyLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> phaseModeAttach, qualityAttach;
     void updateLatencyLabelAndQualityVisibility();
+
+    // Авторская подпись в углу интерфейса
+    juce::Label creditLabel { {}, "Tlek Abeldinov" };
 
     void refreshAttachmentsForBand (int band);
 

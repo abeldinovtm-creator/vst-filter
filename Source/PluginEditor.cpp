@@ -140,6 +140,19 @@ void EQGraphComponent::drawGrid (juce::Graphics& g)
     }
 }
 
+float EQGraphComponent::displayFreqForBand (int bandIndex) const
+{
+    BandParamIDs id (bandIndex);
+    bool autoOn = processor.apvts.getRawParameterValue (id.autoResonance)->load() > 0.5f;
+    if (autoOn)
+    {
+        float autoFreq = processor.currentAutoTrackedFreq[(size_t) bandIndex].load();
+        if (autoFreq > 0.0f)
+            return autoFreq;
+    }
+    return processor.apvts.getRawParameterValue (id.freq)->load();
+}
+
 void EQGraphComponent::updateDisplayBands()
 {
     double sr = processor.currentSampleRate > 0.0 ? processor.currentSampleRate : 44100.0;
@@ -156,9 +169,10 @@ void EQGraphComponent::updateDisplayBands()
     for (int i = 0; i < numBands; ++i)
     {
         BandParamIDs id (i);
-        float freq = processor.apvts.getRawParameterValue (id.freq)->load();
+        float freq = displayFreqForBand (i);
         float gain = processor.apvts.getRawParameterValue (id.gain)->load();
-        float q    = processor.apvts.getRawParameterValue (id.q)->load();
+        bool autoOn = processor.apvts.getRawParameterValue (id.autoResonance)->load() > 0.5f;
+        float q    = autoOn ? EQAudioProcessor::autoResonanceQ : processor.apvts.getRawParameterValue (id.q)->load();
         int type   = (int) processor.apvts.getRawParameterValue (id.type)->load();
         bool en    = processor.apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
         float slopeDbPerOct = processor.apvts.getRawParameterValue (id.slope)->load();
@@ -283,7 +297,7 @@ void EQGraphComponent::drawBandPoints (juce::Graphics& g)
     for (int i = 0; i < numBands; ++i)
     {
         BandParamIDs id (i);
-        float freq = processor.apvts.getRawParameterValue (id.freq)->load();
+        float freq = displayFreqForBand (i);
         float gain = processor.apvts.getRawParameterValue (id.gain)->load();
         bool  en   = processor.apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
 
@@ -303,6 +317,31 @@ void EQGraphComponent::drawBandPoints (juce::Graphics& g)
     }
 }
 
+void EQGraphComponent::drawResonanceMarkers (juce::Graphics& g)
+{
+    auto b = getLocalBounds().toFloat();
+    int count = juce::jmin (processor.detectedResonanceCount.load(), EQAudioProcessor::maxResonancePeaks);
+    auto colour = juce::Colour (FabColours::kResonance);
+
+    for (int i = 0; i < count; ++i)
+    {
+        float freq = processor.detectedResonanceFreqHz[(size_t) i].load();
+        if (freq <= 0.0f)
+            continue;
+
+        float x = freqToX (freq);
+        float top = b.getY();
+
+        juce::Path marker;
+        marker.addTriangle (x - 5.0f, top, x + 5.0f, top, x, top + 9.0f);
+
+        g.setColour (colour.withAlpha (0.85f));
+        g.fillPath (marker);
+        g.setColour (colour.withAlpha (0.25f));
+        g.drawVerticalLine ((int) x, top, b.getBottom());
+    }
+}
+
 void EQGraphComponent::paint (juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
@@ -316,6 +355,7 @@ void EQGraphComponent::paint (juce::Graphics& g)
     drawGrid (g);
     drawDynamicsOverlay (g);
     drawResponseCurve (g);
+    drawResonanceMarkers (g);
     drawBandPoints (g);
 }
 
@@ -324,7 +364,7 @@ int EQGraphComponent::findBandNear (juce::Point<float> pos) const
     for (int i = 0; i < numBands; ++i)
     {
         BandParamIDs id (i);
-        float freq = processor.apvts.getRawParameterValue (id.freq)->load();
+        float freq = displayFreqForBand (i);
         float gain = processor.apvts.getRawParameterValue (id.gain)->load();
         juce::Point<float> p (freqToX (freq), gainToY (gain));
         if (p.getDistanceFrom (pos) < 12.0f)
@@ -438,6 +478,8 @@ EQAudioProcessorEditor::EQAudioProcessorEditor (EQAudioProcessor& p)
     addAndMakeVisible (bandLabel);
     bandLabel.setJustificationType (juce::Justification::centred);
 
+    addAndMakeVisible (autoResonanceToggle);
+
     addAndMakeVisible (dynEnabledToggle);
     for (auto* s : { &dynThresholdSlider, &dynRangeSlider })
     {
@@ -471,6 +513,12 @@ EQAudioProcessorEditor::EQAudioProcessorEditor (EQAudioProcessor& p)
 
     phaseModeBox.onChange = [this] { updateLatencyLabelAndQualityVisibility(); };
     updateLatencyLabelAndQualityVisibility();
+
+    addAndMakeVisible (creditLabel);
+    creditLabel.setJustificationType (juce::Justification::centredRight);
+    creditLabel.setFont (11.0f);
+    creditLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.35f));
+    creditLabel.setInterceptsMouseClicks (false, false);
 
     graph.onBandSelected = [this] (int band) { refreshAttachmentsForBand (band); };
     refreshAttachmentsForBand (0);
@@ -518,6 +566,7 @@ void EQAudioProcessorEditor::refreshAttachmentsForBand (int band)
     dynEnabledAttach.reset();
     dynThresholdAttach.reset();
     dynRangeAttach.reset();
+    autoResonanceAttach.reset();
 
     freqAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, id.freq, freqSlider);
     gainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, id.gain, gainSlider);
@@ -529,6 +578,7 @@ void EQAudioProcessorEditor::refreshAttachmentsForBand (int band)
     dynEnabledAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (audioProcessor.apvts, id.dynEnabled, dynEnabledToggle);
     dynThresholdAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, id.dynThreshold, dynThresholdSlider);
     dynRangeAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, id.dynRange, dynRangeSlider);
+    autoResonanceAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (audioProcessor.apvts, id.autoResonance, autoResonanceToggle);
 
     bandLabel.setText ("Band " + juce::String (band + 1), juce::dontSendNotification);
     updateQVsSlopeVisibility();
@@ -572,6 +622,8 @@ void EQAudioProcessorEditor::resized()
     top.removeFromLeft (12);
     latencyLabel.setBounds (top.removeFromLeft (220));
 
+    creditLabel.setBounds (top);
+
     graph.setBounds (area.reduced (8));
 
     bottom.reduce (12, 8);
@@ -583,6 +635,9 @@ void EQAudioProcessorEditor::resized()
     auto qArea = bottom.removeFromLeft (100);
     qSlider.setBounds (qArea);
     slopeSlider.setBounds (qArea);
+
+    bottom.removeFromLeft (8);
+    autoResonanceToggle.setBounds (bottom.removeFromLeft (55).reduced (0, 40));
 
     bottom.removeFromLeft (8);
     dynEnabledToggle.setBounds (bottom.removeFromLeft (50).reduced (0, 40));

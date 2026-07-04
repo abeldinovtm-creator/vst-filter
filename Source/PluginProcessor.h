@@ -8,6 +8,7 @@ struct BandParamIDs
 {
     juce::String freq, gain, q, type, enabled, slope;
     juce::String dynEnabled, dynThreshold, dynRange;
+    juce::String autoResonance;
 
     explicit BandParamIDs (int index)
     {
@@ -21,6 +22,7 @@ struct BandParamIDs
         dynEnabled   = "band" + p + "_dyn_enabled";
         dynThreshold = "band" + p + "_dyn_threshold";
         dynRange     = "band" + p + "_dyn_range";
+        autoResonance = "band" + p + "_auto_resonance";
     }
 };
 
@@ -94,6 +96,46 @@ public:
     // Текущая поправка гейна от dynamics-детектора на каждую полосу. Читается из
     // EQGraphComponent (UI-поток) для "дышащей" кривой без гонки с аудио-потоком.
     std::array<std::atomic<float>, numBands> currentDynGainOffsetDb {};
+
+    // ---- Auto-resonance ----
+    // Полосы с включённым Auto сами находят самый выступающий резонанс в
+    // спектре и настраиваются на него: фиксированное узкое Q, а гашение —
+    // через тот же (уже обкатанный) механизм Dynamic EQ, но с внутренними
+    // фиксированными threshold/range, а не через видимые ручки Threshold/Range.
+    static constexpr float autoResonanceQ = 8.0f;
+    static constexpr float autoResonanceThresholdDb = -36.0f;
+    static constexpr float autoResonanceRangeDb = -8.0f;
+
+    // До скольких резонансов одновременно ищем и подсвечиваем на графике.
+    // Полосы с Auto разбирают их по порядку выраженности (самая заметная —
+    // первой Auto-полосе, следующая — второй, и т.д.)
+    static constexpr int maxResonancePeaks = 8;
+    std::array<std::atomic<float>, maxResonancePeaks> detectedResonanceFreqHz {};
+    std::atomic<int> detectedResonanceCount { 0 };
+
+    // Частота, на которую полоса РЕАЛЬНО настроена, когда включён Auto — для
+    // отображения в графике/точке (сам APVTS-параметр freq в этом режиме
+    // игнорируется движком, поэтому UI должен брать значение отсюда).
+    std::array<std::atomic<float>, numBands> currentAutoTrackedFreq {};
+
+    // Отдельный, ДО-EQ (dry) FFT-анализатор для поиска резонансов — специально
+    // независимый от post-EQ спектра, который рисуется фоном: как только
+    // Auto-полоса начинает резать резонанс, он бы исчез из post-EQ спектра, и
+    // детектор потерял бы собственную цель.
+    static constexpr int resonanceFftOrder = 12; // 4096 — приличное разрешение на НЧ
+    static constexpr int resonanceFftSize = 1 << resonanceFftOrder;
+    juce::dsp::FFT resonanceFft { resonanceFftOrder };
+    juce::dsp::WindowingFunction<float> resonanceWindow { (size_t) resonanceFftSize, juce::dsp::WindowingFunction<float>::hann };
+    std::atomic<bool> nextResonanceFFTBlockReady { false };
+    float resonanceFifoBuffer[resonanceFftSize];
+    float resonanceFftData[2 * resonanceFftSize];
+    int resonanceFifoIndex = 0;
+    juce::CriticalSection resonanceFftLock;
+
+    void pushNextDrySampleIntoResonanceFifo (float sample);
+    // Вызывается из UI-потока (таймер графика): FFT + peak-picking по dry
+    // спектру, результат — в detectedResonanceFreqHz/detectedResonanceCount.
+    void updateResonancePeaks();
 
     // ---- Linear Phase ----
     LinearPhaseEQ linearPhaseEQ;
