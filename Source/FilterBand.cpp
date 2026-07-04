@@ -11,6 +11,10 @@ void FilterBand::prepare (const juce::dsp::ProcessSpec& spec)
 
     scratchBuffer.setSize ((int) spec.numChannels, (int) spec.maximumBlockSize);
 
+    detector.prepare (spec);
+    detectorScratch.realloc ((size_t) spec.maximumBlockSize);
+    detectorScratchSize = (int) spec.maximumBlockSize;
+
     updateCoefficients();
 }
 
@@ -20,6 +24,9 @@ void FilterBand::reset()
     for (auto& f : stagesR) f.reset();
     for (auto& f : stagesL2) f.reset();
     for (auto& f : stagesR2) f.reset();
+
+    detector.reset();
+    envelopeDb = -100.0f;
 }
 
 void FilterBand::setParameters (FilterType type, float frequencyHz, float gainDb, float qVal, float slopeOrder)
@@ -177,6 +184,62 @@ void FilterBand::process (juce::dsp::AudioBlock<float>& block)
             stagesR[(size_t) stage].process (ctx);
         }
     }
+}
+
+void FilterBand::setDynamicsParameters (bool dynamicsEnabled, float thresholdDb, float rangeDb)
+{
+    dynEnabled = dynamicsEnabled;
+    dynThreshold = thresholdDb;
+    dynRange = rangeDb;
+}
+
+float FilterBand::computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sr)
+{
+    if (! dynEnabled || dynRange == 0.0f)
+        return 0.0f;
+
+    auto numSamples = (int) dryBlock.getNumSamples();
+    auto numChannels = (int) dryBlock.getNumChannels();
+
+    if (numSamples <= 0 || numChannels <= 0)
+        return 0.0f;
+
+    if (detectorScratchSize < numSamples)
+    {
+        detectorScratch.realloc ((size_t) numSamples);
+        detectorScratchSize = numSamples;
+    }
+
+    for (int n = 0; n < numSamples; ++n)
+    {
+        float sum = 0.0f;
+        for (int ch = 0; ch < numChannels; ++ch)
+            sum += dryBlock.getSample (ch, n);
+        detectorScratch[n] = sum / (float) numChannels;
+    }
+
+    detector.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sr, freq, juce::jmax (q, 0.3f));
+
+    double sumOfSquares = 0.0;
+    for (int n = 0; n < numSamples; ++n)
+    {
+        float y = detector.processSample (detectorScratch[n]);
+        sumOfSquares += (double) y * (double) y;
+    }
+
+    float rms = std::sqrt ((float) (sumOfSquares / (double) numSamples));
+    float levelDb = juce::Decibels::gainToDecibels (rms, -100.0f);
+
+    double blockMs = 1000.0 * (double) numSamples / sr;
+    bool attacking = levelDb > envelopeDb;
+    float coeff = (float) std::exp (-blockMs / (attacking ? 15.0 : 150.0));
+
+    envelopeDb = coeff * envelopeDb + (1.0f - coeff) * levelDb;
+
+    float excess = envelopeDb - dynThreshold;
+    float absRange = std::abs (dynRange);
+    float clamped = juce::jlimit (0.0f, absRange, excess);
+    return clamped * (dynRange < 0.0f ? -1.0f : 1.0f);
 }
 
 float FilterBand::getMagnitudeForFrequency (double frequencyHz, double sr) const

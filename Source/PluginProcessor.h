@@ -7,6 +7,7 @@
 struct BandParamIDs
 {
     juce::String freq, gain, q, type, enabled, slope;
+    juce::String dynEnabled, dynThreshold, dynRange;
 
     explicit BandParamIDs (int index)
     {
@@ -17,6 +18,9 @@ struct BandParamIDs
         type    = "band" + p + "_type";
         enabled = "band" + p + "_enabled";
         slope   = "band" + p + "_slope";
+        dynEnabled   = "band" + p + "_dyn_enabled";
+        dynThreshold = "band" + p + "_dyn_threshold";
+        dynRange     = "band" + p + "_dyn_range";
     }
 };
 
@@ -66,6 +70,12 @@ public:
 
     std::array<FilterBand, numBands> bandsLeftRight; // одна инстанция FilterBand обрабатывает оба канала внутри
     double currentSampleRate = 44100.0;
+
+    // ---- Dynamic EQ ----
+    juce::AudioBuffer<float> dryBuffer;
+    // Текущая поправка гейна от dynamics-детектора на каждую полосу. Читается из
+    // EQGraphComponent (UI-поток) для "дышащей" кривой без гонки с аудио-потоком.
+    std::array<std::atomic<float>, numBands> currentDynGainOffsetDb {};
 
     // ---- Linear Phase ----
     LinearPhaseEQ linearPhaseEQ;

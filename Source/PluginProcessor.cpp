@@ -60,6 +60,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQAudioProcessor::createPara
         params.push_back (std::make_unique<juce::AudioParameterFloat>(
             id.slope, "Band " + juce::String (i + 1) + " Slope",
             juce::NormalisableRange<float> (6.0f, 48.0f, 0.1f), 12.0f));
+
+        // ---- Dynamic EQ ----
+        params.push_back (std::make_unique<juce::AudioParameterBool>(
+            id.dynEnabled, "Band " + juce::String (i + 1) + " Dyn Enabled", false));
+
+        params.push_back (std::make_unique<juce::AudioParameterFloat>(
+            id.dynThreshold, "Band " + juce::String (i + 1) + " Dyn Threshold",
+            juce::NormalisableRange<float> (-60.0f, 0.0f, 0.1f), -24.0f));
+
+        params.push_back (std::make_unique<juce::AudioParameterFloat>(
+            id.dynRange, "Band " + juce::String (i + 1) + " Dyn Range",
+            juce::NormalisableRange<float> (-30.0f, 30.0f, 0.1f), 0.0f));
     }
 
     return { params.begin(), params.end() };
@@ -79,6 +91,8 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         band.prepare (spec);
         band.reset();
     }
+
+    dryBuffer.setSize (2, samplesPerBlock, false, false, true);
 
     linearPhaseEQ.prepare (sampleRate, samplesPerBlock);
     linearPhaseEQ.setQuality ((int) apvts.getRawParameterValue ("linphase_quality")->load());
@@ -115,31 +129,22 @@ void EQAudioProcessor::pushNextSampleIntoFifo (float sample)
     fifoBuffer[fifoIndex++] = sample;
 }
 
+namespace
+{
+    // Гранула обновления dynamics-детектора и коэффициентов биквадов в
+    // zero-latency режиме. Если считать динамическую поправку и сразу менять
+    // коэффициенты фильтра раз на весь буфер (256-1024+ сэмплов), резкий скачок
+    // огибающей на транзиенте даёт мгновенную подмену коэффициентов и слышимый
+    // "треск" на границе блока. Пересчитывая маленькими кусками, тот же скачок
+    // растягивается на несколько мелких шагов и перестаёт щёлкать.
+    constexpr int dynSubBlockSize = 64;
+}
+
 void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
 
-    LinearPhaseEQ::BandSnapshot snapshot[numBands];
-
-    // Обновляем параметры каждой полосы из APVTS перед обработкой блока
-    for (int i = 0; i < numBands; ++i)
-    {
-        BandParamIDs id (i);
-        auto freq = apvts.getRawParameterValue (id.freq)->load();
-        auto gain = apvts.getRawParameterValue (id.gain)->load();
-        auto q    = apvts.getRawParameterValue (id.q)->load();
-        auto type = (int) apvts.getRawParameterValue (id.type)->load();
-        auto en   = apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
-        auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
-        float order = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f); // dB/oct -> число полюсов
-
-        FilterType ft = filterTypeFromIndex (type);
-
-        bandsLeftRight[(size_t) i].enabled = en;
-        bandsLeftRight[(size_t) i].setParameters (ft, freq, gain, q, order);
-
-        snapshot[i] = { ft, freq, gain, q, en, order };
-    }
+    auto totalNumSamples = buffer.getNumSamples();
 
     auto mode = getPhaseMode();
 
@@ -157,6 +162,48 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     if (mode == PhaseMode::Linear)
     {
+        // Свёртка обрабатывает буфер целиком за один проход — зиппер-шумов от
+        // покусочной смены коэффициентов тут нет, поэтому dynamics меряем один
+        // раз на весь блок, как раньше.
+        dryBuffer.setSize (2, totalNumSamples, false, false, true);
+        for (int ch = 0; ch < buffer.getNumChannels() && ch < dryBuffer.getNumChannels(); ++ch)
+            dryBuffer.copyFrom (ch, 0, buffer, ch, 0, totalNumSamples);
+        const juce::AudioBuffer<float>& constDryBuffer = dryBuffer;
+        juce::dsp::AudioBlock<const float> dryBlock (constDryBuffer);
+
+        LinearPhaseEQ::BandSnapshot snapshot[numBands];
+
+        for (int i = 0; i < numBands; ++i)
+        {
+            BandParamIDs id (i);
+            auto freq = apvts.getRawParameterValue (id.freq)->load();
+            auto gain = apvts.getRawParameterValue (id.gain)->load();
+            auto q    = apvts.getRawParameterValue (id.q)->load();
+            auto type = (int) apvts.getRawParameterValue (id.type)->load();
+            auto en   = apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
+            auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
+            float order = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
+
+            auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
+            auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
+            auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+
+            FilterType ft = filterTypeFromIndex (type);
+
+            auto& band = bandsLeftRight[(size_t) i];
+            band.enabled = en;
+            band.setDynamicsParameters (dynEnabled, dynThreshold, dynRange);
+            band.setParameters (ft, freq, gain, q, order);
+
+            float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate);
+            currentDynGainOffsetDb[(size_t) i].store (dynOffset);
+
+            float totalGain = gain + dynOffset;
+            band.setParameters (ft, freq, totalGain, q, order);
+
+            snapshot[i] = { ft, freq, totalGain, q, en, order };
+        }
+
         linearPhaseEQ.setQuality ((int) apvts.getRawParameterValue ("linphase_quality")->load());
         std::array<LinearPhaseEQ::BandSnapshot, numBands> arr;
         for (int i = 0; i < numBands; ++i) arr[(size_t) i] = snapshot[i];
@@ -165,13 +212,56 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     }
     else
     {
-        for (auto& band : bandsLeftRight)
-            band.process (block);
+        for (int start = 0; start < totalNumSamples; start += dynSubBlockSize)
+        {
+            int len = juce::jmin (dynSubBlockSize, totalNumSamples - start);
+
+            // dryBuffer подготовлен на dynSubBlockSize в prepareToPlay, так что
+            // setSize здесь только уменьшает заявленный размер и не аллоцирует
+            // память в аудио-потоке.
+            dryBuffer.setSize (2, len, false, false, true);
+            for (int ch = 0; ch < buffer.getNumChannels() && ch < dryBuffer.getNumChannels(); ++ch)
+                dryBuffer.copyFrom (ch, 0, buffer, ch, start, len);
+            const juce::AudioBuffer<float>& constDryBuffer = dryBuffer;
+            juce::dsp::AudioBlock<const float> dryBlock (constDryBuffer);
+
+            for (int i = 0; i < numBands; ++i)
+            {
+                BandParamIDs id (i);
+                auto freq = apvts.getRawParameterValue (id.freq)->load();
+                auto gain = apvts.getRawParameterValue (id.gain)->load();
+                auto q    = apvts.getRawParameterValue (id.q)->load();
+                auto type = (int) apvts.getRawParameterValue (id.type)->load();
+                auto en   = apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
+                auto slopeDbPerOct = apvts.getRawParameterValue (id.slope)->load();
+                float order = juce::jlimit (1.0f, 8.0f, slopeDbPerOct / 6.0f);
+
+                auto dynEnabled   = apvts.getRawParameterValue (id.dynEnabled)->load() > 0.5f;
+                auto dynThreshold = apvts.getRawParameterValue (id.dynThreshold)->load();
+                auto dynRange     = apvts.getRawParameterValue (id.dynRange)->load();
+
+                FilterType ft = filterTypeFromIndex (type);
+
+                auto& band = bandsLeftRight[(size_t) i];
+                band.enabled = en;
+                band.setDynamicsParameters (dynEnabled, dynThreshold, dynRange);
+                band.setParameters (ft, freq, gain, q, order);
+
+                float dynOffset = band.computeDynamicsGainOffsetDb (dryBlock, currentSampleRate);
+                currentDynGainOffsetDb[(size_t) i].store (dynOffset);
+
+                band.setParameters (ft, freq, gain + dynOffset, q, order);
+            }
+
+            auto subBlock = block.getSubBlock ((size_t) start, (size_t) len);
+            for (auto& band : bandsLeftRight)
+                band.process (subBlock);
+        }
     }
 
     // Питаем спектр-анализатор сэмплами после обработки (пост-EQ отклик)
     auto* readPtr = buffer.getReadPointer (0);
-    for (int n = 0; n < buffer.getNumSamples(); ++n)
+    for (int n = 0; n < totalNumSamples; ++n)
         pushNextSampleIntoFifo (readPtr[n]);
 }
 

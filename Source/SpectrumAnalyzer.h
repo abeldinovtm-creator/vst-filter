@@ -8,7 +8,7 @@ class SpectrumAnalyzer : public juce::Component, private juce::Timer
 public:
     explicit SpectrumAnalyzer (EQAudioProcessor& p) : processor (p)
     {
-        startTimerHz (30);
+        startTimerHz (60);
     }
 
     void paint (juce::Graphics& g) override

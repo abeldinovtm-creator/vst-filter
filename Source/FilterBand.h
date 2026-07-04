@@ -35,6 +35,13 @@ public:
     // Для отрисовки АЧХ в редакторе: комплексный отклик на заданной частоте
     float getMagnitudeForFrequency (double frequencyHz, double sampleRate) const;
 
+    // ---- Dynamic EQ ----
+    void setDynamicsParameters (bool enabled, float thresholdDb, float rangeDb);
+
+    // Детектирует уровень сигнала в полосе (bandpass на freq/q) и возвращает
+    // поправку к gain в дБ (0, если dynamics выключен или диапазон не задан).
+    float computeDynamicsGainOffsetDb (const juce::dsp::AudioBlock<const float>& dryBlock, double sampleRate);
+
     bool enabled = true;
 
     static constexpr int maxStages = 4;
@@ -65,4 +72,13 @@ private:
     float slopeBlend = 0.0f; // 0 = только основной каскад, 1 = только второй
 
     juce::AudioBuffer<float> scratchBuffer;
+
+    // ---- Dynamic EQ ----
+    bool dynEnabled = false;
+    float dynThreshold = -24.0f;
+    float dynRange = 0.0f;
+    juce::dsp::IIR::Filter<float> detector;
+    float envelopeDb = -100.0f;
+    juce::HeapBlock<float> detectorScratch;
+    int detectorScratchSize = 0;
 };
