@@ -6,6 +6,17 @@ namespace
     {
         return juce::Colour (FabColours::kGold);
     }
+
+    juce::String formatFreqLabel (float f)
+    {
+        if (f >= 1000.0f)
+        {
+            float k = f / 1000.0f;
+            bool isWhole = std::abs (k - std::round (k)) < 0.01f;
+            return (isWhole ? juce::String ((int) std::round (k)) : juce::String (k, 1)) + "k";
+        }
+        return juce::String ((int) f);
+    }
 }
 
 // ============================== FabLookAndFeel ==============================
@@ -122,21 +133,29 @@ float EQGraphComponent::yToGain (float y) const
 void EQGraphComponent::drawGrid (juce::Graphics& g)
 {
     auto b = getLocalBounds().toFloat();
-    g.setColour (juce::Colours::white.withAlpha (0.08f));
+    g.setFont (10.0f);
 
-    // Вертикальные линии на характерных частотах
+    // Вертикальные линии на характерных частотах + подписи снизу
     for (float f : { 20.f, 50.f, 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f, 20000.f })
     {
         float x = freqToX (f);
+        g.setColour (juce::Colours::white.withAlpha (0.08f));
         g.drawVerticalLine ((int) x, b.getY(), b.getBottom());
+
+        g.setColour (juce::Colours::white.withAlpha (0.4f));
+        g.drawText (formatFreqLabel (f), (int) x - 18, (int) b.getBottom() - 14, 36, 12, juce::Justification::centred);
     }
 
-    // Горизонтальные линии на dB-шагах
+    // Горизонтальные линии на dB-шагах + подписи слева
     for (float db = minDb; db <= maxDb; db += 6.0f)
     {
         float y = gainToY (db);
         g.setColour (db == 0.0f ? juce::Colours::white.withAlpha (0.25f) : juce::Colours::white.withAlpha (0.08f));
         g.drawHorizontalLine ((int) y, b.getX(), b.getRight());
+
+        juce::String label = (db > 0.0f ? "+" : "") + juce::String ((int) db);
+        g.setColour (juce::Colours::white.withAlpha (0.4f));
+        g.drawText (label, (int) b.getX() + 4, (int) y - 6, 32, 12, juce::Justification::left);
     }
 }
 
