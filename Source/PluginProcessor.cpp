@@ -57,7 +57,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQAudioProcessor::createPara
             id.type, "Band " + juce::String (i + 1) + " Type", typeChoices, 0));
 
         params.push_back (std::make_unique<juce::AudioParameterBool>(
-            id.enabled, "Band " + juce::String (i + 1) + " Enabled", i == 0 || i == numBands - 1));
+            id.enabled, "Band " + juce::String (i + 1) + " Enabled", false));
+
+        // Не показывается как отдельный контрол в UI — просто помечает, что
+        // полоса когда-либо была активирована кликом по графику. См. комментарий
+        // у BandParamIDs::used в PluginProcessor.h. Изначально пусто — как в
+        // FabFilter, ни одной точки на старте, пока пользователь сам не кликнет.
+        params.push_back (std::make_unique<juce::AudioParameterBool>(
+            id.used, "Band " + juce::String (i + 1) + " Used", false));
 
         // Крутизна ската для Low Cut/High Cut, непрерывно 6..48 dB/oct (1..8 полюсов)
         params.push_back (std::make_unique<juce::AudioParameterFloat>(
@@ -146,6 +153,9 @@ void EQAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     juce::zeromem (fifoBuffer, sizeof (fifoBuffer));
     fifoIndex = 0;
 
+    juce::zeromem (preFifoBuffer, sizeof (preFifoBuffer));
+    preFifoIndex = 0;
+
     juce::zeromem (resonanceFifoBuffer, sizeof (resonanceFifoBuffer));
     resonanceFifoIndex = 0;
     detectedResonanceCount.store (0);
@@ -174,6 +184,23 @@ void EQAudioProcessor::pushNextSampleIntoFifo (float sample)
     }
 
     fifoBuffer[fifoIndex++] = sample;
+}
+
+void EQAudioProcessor::pushNextPreSampleIntoFifo (float sample)
+{
+    if (preFifoIndex == fftSize)
+    {
+        if (! nextPreFFTBlockReady.load())
+        {
+            const juce::ScopedLock lock (preFftLock);
+            juce::zeromem (preFftData, sizeof (preFftData));
+            memcpy (preFftData, preFifoBuffer, sizeof (preFifoBuffer));
+            nextPreFFTBlockReady.store (true);
+        }
+        preFifoIndex = 0;
+    }
+
+    preFifoBuffer[preFifoIndex++] = sample;
 }
 
 void EQAudioProcessor::pushNextDrySampleIntoResonanceFifo (float sample)
@@ -252,15 +279,19 @@ void EQAudioProcessor::updateResonancePeaks()
     std::sort (candidates.begin(), candidates.end(),
               [] (const Candidate& a, const Candidate& b) { return a.prominence > b.prominence; });
 
-    // Разносим по минимальному расстоянию (~5% по частоте), чтобы не поймать
-    // соседние бины одного и того же резонанса как несколько разных.
+    // Разносим по минимальному расстоянию (~25% по частоте, примерно треть
+    // октавы). 5% было слишком мало: две Auto-полосы могли "нацелиться" на
+    // почти соседние частоты одного и того же широкого баса/резонанса, и их
+    // узкие (но не бесконечно узкие) вырезы по -8dB каждый накладывались друг
+    // на друга, суммируясь в один куда более глубокий и широкий common-провал
+    // вместо двух отдельных аккуратных вырезов.
     std::vector<float> picked;
     for (auto& c : candidates)
     {
         bool tooClose = false;
         for (float p : picked)
         {
-            if (std::abs (std::log (c.freq / p)) < std::log (1.05f))
+            if (std::abs (std::log (c.freq / p)) < std::log (1.25f))
             {
                 tooClose = true;
                 break;
@@ -298,11 +329,16 @@ void EQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     // Резонансы ищем по ИСХОДНОМУ (до-EQ) сигналу, пока band'ы ещё не успели
     // его обработать — иначе как только Auto-полоса начинает резать резонанс,
-    // он бы пропал из анализа и детектор потерял бы собственную цель.
+    // он бы пропал из анализа и детектор потерял бы собственную цель. Тот же
+    // сырой сигнал заодно кормит отдельный pre-EQ пайплайн для одновременного
+    // pre/post отображения в спектр-анализаторе.
     {
         auto* dryReadPtr = buffer.getReadPointer (0);
         for (int n = 0; n < totalNumSamples; ++n)
+        {
             pushNextDrySampleIntoResonanceFifo (dryReadPtr[n]);
+            pushNextPreSampleIntoFifo (dryReadPtr[n]);
+        }
     }
 
     // Полосы с включённым Auto разбирают найденные резонансы по порядку

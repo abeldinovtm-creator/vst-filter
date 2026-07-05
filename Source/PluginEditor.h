@@ -18,6 +18,10 @@ namespace FabColours
     // Маркеры авто-найденных резонансов на графике — тревожный красно-оранжевый,
     // чтобы явно отличаться от кривой/точек полос.
     static constexpr juce::uint32 kResonance = 0xffff5a3c;
+
+    // Отдельная тонкая кривая ТОЛЬКО выбранной полосы (как в FabFilter Pro-Q) —
+    // мягкий сиреневый, чтобы не спутать с общей суммарной кривой (kAccent).
+    static constexpr juce::uint32 kSelectedBandCurve = 0xff8f7fe8;
 }
 
 /** Тёмная тема с коралловым акцентом: кастомные ручки и тумблеры. */
@@ -55,6 +59,10 @@ public:
     int selectedBand = -1;
     std::function<void(int)> onBandSelected;
 
+    // Тумблер "показывать вход+выход одновременно" в спектр-анализаторе —
+    // чисто визуальная настройка, не завязана на APVTS-параметр.
+    void setShowPrePost (bool shouldShow) { spectrum.setShowPrePost (shouldShow); }
+
 private:
     void timerCallback() override { processor.updateResonancePeaks(); repaint(); }
 
@@ -67,6 +75,7 @@ private:
     void drawGrid (juce::Graphics& g);
     void drawDynamicsOverlay (juce::Graphics& g);
     void drawResponseCurve (juce::Graphics& g);
+    void drawAllBandCurves (juce::Graphics& g);
     void drawBandPoints (juce::Graphics& g);
     void drawResonanceMarkers (juce::Graphics& g);
 
@@ -143,6 +152,20 @@ private:
     juce::Label phaseModeLabel { {}, "Phase" }, qualityLabel { {}, "Quality" }, latencyLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> phaseModeAttach, qualityAttach;
     void updateLatencyLabelAndQualityVisibility();
+
+    // Тумблер одновременного pre/post отображения в спектр-анализаторе —
+    // чисто визуальная настройка (не APVTS-параметр), поэтому обычный onClick,
+    // а не ButtonAttachment.
+    juce::ToggleButton prePostToggle { "I/O" };
+
+    // Сброс всех параметров к дефолтным значениям + сохранение/загрузка
+    // пресетов (сериализация APVTS state в XML на диск, тот же формат, что
+    // getStateInformation/setStateInformation используют для сессии хоста).
+    juce::TextButton resetButton { "Reset" }, savePresetButton { "Save" }, loadPresetButton { "Load" };
+    void resetAllParametersToDefault();
+    void savePresetToFile();
+    void loadPresetFromFile();
+    std::unique_ptr<juce::FileChooser> activeFileChooser;
 
     // Авторская подпись в углу интерфейса
     juce::Label creditLabel { {}, "Tlek Abeldinov" };

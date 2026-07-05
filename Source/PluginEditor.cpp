@@ -311,11 +311,53 @@ void EQGraphComponent::drawResponseCurve (juce::Graphics& g)
     g.strokePath (curve, juce::PathStrokeType (2.0f));
 }
 
+void EQGraphComponent::drawAllBandCurves (juce::Graphics& g)
+{
+    auto b = getLocalBounds().toFloat();
+    const int numPoints = juce::jmax (2, (int) b.getWidth() * 4);
+    auto baseColour = juce::Colour (FabColours::kSelectedBandCurve);
+
+    for (int bandIndex = 0; bandIndex < numBands; ++bandIndex)
+    {
+        auto& band = displayBands[(size_t) bandIndex];
+        if (! band.enabled)
+            continue;
+
+        bool isSelected = (bandIndex == selectedBand);
+
+        juce::Path curve;
+
+        // Тот же оверсэмплинг, что и для суммарной кривой — иначе узкие высоко-Q
+        // полосы рисуются зубчато.
+        for (int i = 0; i < numPoints; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / (float) (numPoints - 1);
+            float freq = xToFreq (x);
+
+            float mag = band.getMagnitudeForFrequency (freq, displaySampleRate);
+            float db = juce::Decibels::gainToDecibels (mag, -60.0f);
+            float y = gainToY (juce::jlimit (minDb, maxDb, db));
+
+            if (i == 0) curve.startNewSubPath (x, y);
+            else        curve.lineTo (x, y);
+        }
+
+        // Выбранная полоса — ярко и толще, остальные — приглушённо и тоньше,
+        // чтобы не забивать график, но всё же показывать вклад каждой полосы.
+        g.setColour (baseColour.withAlpha (isSelected ? 0.85f : 0.28f));
+        g.strokePath (curve, juce::PathStrokeType (isSelected ? 1.4f : 0.9f));
+    }
+}
+
 void EQGraphComponent::drawBandPoints (juce::Graphics& g)
 {
     for (int i = 0; i < numBands; ++i)
     {
         BandParamIDs id (i);
+        bool used = processor.apvts.getRawParameterValue (id.used)->load() > 0.5f;
+        if (! used)
+            continue; // ни разу не активированный слот — точку не показываем вообще
+
         float freq = displayFreqForBand (i);
         float gain = processor.apvts.getRawParameterValue (id.gain)->load();
         bool  en   = processor.apvts.getRawParameterValue (id.enabled)->load() > 0.5f;
@@ -374,6 +416,7 @@ void EQGraphComponent::paint (juce::Graphics& g)
     drawGrid (g);
     drawDynamicsOverlay (g);
     drawResponseCurve (g);
+    drawAllBandCurves (g);
     drawResonanceMarkers (g);
     drawBandPoints (g);
 }
@@ -383,6 +426,10 @@ int EQGraphComponent::findBandNear (juce::Point<float> pos) const
     for (int i = 0; i < numBands; ++i)
     {
         BandParamIDs id (i);
+        bool used = processor.apvts.getRawParameterValue (id.used)->load() > 0.5f;
+        if (! used)
+            continue; // без видимой точки клик не должен её "находить"
+
         float freq = displayFreqForBand (i);
         float gain = processor.apvts.getRawParameterValue (id.gain)->load();
         juce::Point<float> p (freqToX (freq), gainToY (gain));
@@ -395,6 +442,37 @@ int EQGraphComponent::findBandNear (juce::Point<float> pos) const
 void EQGraphComponent::mouseDown (const juce::MouseEvent& e)
 {
     int band = findBandNear (e.position);
+
+    if (band < 0)
+    {
+        // Клик по пустому месту графика — как в FabFilter: создаём новую
+        // точку, беря первую ЕЩЁ НИ РАЗУ не использованную полосу из пула
+        // (не "выключенную" — уже использованная, но выключенная полоса не
+        // должна перепрыгивать на новое место) и активируя её на позиции клика.
+        for (int i = 0; i < numBands; ++i)
+        {
+            BandParamIDs id (i);
+            bool alreadyUsed = processor.apvts.getRawParameterValue (id.used)->load() > 0.5f;
+            if (alreadyUsed)
+                continue;
+
+            float freq = juce::jlimit (minFreq, maxFreq, xToFreq (e.position.x));
+            float gain = juce::jlimit (minDb, maxDb, yToGain (e.position.y));
+
+            if (auto* p = processor.apvts.getParameter (id.freq))
+                p->setValueNotifyingHost (p->convertTo0to1 (freq));
+            if (auto* p = processor.apvts.getParameter (id.gain))
+                p->setValueNotifyingHost (p->convertTo0to1 (gain));
+            if (auto* p = processor.apvts.getParameter (id.enabled))
+                p->setValueNotifyingHost (1.0f);
+            if (auto* p = processor.apvts.getParameter (id.used))
+                p->setValueNotifyingHost (1.0f);
+
+            band = i;
+            break;
+        }
+    }
+
     if (band >= 0)
     {
         selectedBand = band;
@@ -533,6 +611,18 @@ EQAudioProcessorEditor::EQAudioProcessorEditor (EQAudioProcessor& p)
     phaseModeBox.onChange = [this] { updateLatencyLabelAndQualityVisibility(); };
     updateLatencyLabelAndQualityVisibility();
 
+    addAndMakeVisible (prePostToggle);
+    prePostToggle.onClick = [this] { graph.setShowPrePost (prePostToggle.getToggleState()); };
+    prePostToggle.setToggleState (true, juce::dontSendNotification);
+    graph.setShowPrePost (true);
+
+    addAndMakeVisible (resetButton);
+    resetButton.onClick = [this] { resetAllParametersToDefault(); };
+    addAndMakeVisible (savePresetButton);
+    savePresetButton.onClick = [this] { savePresetToFile(); };
+    addAndMakeVisible (loadPresetButton);
+    loadPresetButton.onClick = [this] { loadPresetFromFile(); };
+
     addAndMakeVisible (creditLabel);
     creditLabel.setJustificationType (juce::Justification::centredRight);
     creditLabel.setFont (11.0f);
@@ -571,6 +661,54 @@ void EQAudioProcessorEditor::updateLatencyLabelAndQualityVisibility()
 void EQAudioProcessorEditor::timerCallback()
 {
     updateLatencyLabelAndQualityVisibility();
+}
+
+void EQAudioProcessorEditor::resetAllParametersToDefault()
+{
+    for (auto* param : audioProcessor.getParameters())
+        param->setValueNotifyingHost (param->getDefaultValue());
+}
+
+void EQAudioProcessorEditor::savePresetToFile()
+{
+    activeFileChooser = std::make_unique<juce::FileChooser> ("Save preset", juce::File(), "*.xml");
+
+    auto flags = juce::FileBrowserComponent::saveMode
+               | juce::FileBrowserComponent::canSelectFiles
+               | juce::FileBrowserComponent::warnAboutOverwriting;
+
+    activeFileChooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File())
+            return;
+
+        // Тот же формат, что getStateInformation()/setStateInformation()
+        // используют для сохранения состояния в сессии хоста — просто пишем
+        // его отдельным XML-файлом на диск.
+        auto state = audioProcessor.apvts.copyState();
+        std::unique_ptr<juce::XmlElement> xml (state.createXml());
+        if (xml != nullptr)
+            xml->writeTo (file);
+    });
+}
+
+void EQAudioProcessorEditor::loadPresetFromFile()
+{
+    activeFileChooser = std::make_unique<juce::FileChooser> ("Load preset", juce::File(), "*.xml");
+
+    auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+
+    activeFileChooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File() || ! file.existsAsFile())
+            return;
+
+        std::unique_ptr<juce::XmlElement> xml (juce::XmlDocument::parse (file));
+        if (xml != nullptr && xml->hasTagName (audioProcessor.apvts.state.getType()))
+            audioProcessor.apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    });
 }
 
 void EQAudioProcessorEditor::refreshAttachmentsForBand (int band)
@@ -640,6 +778,14 @@ void EQAudioProcessorEditor::resized()
     qualityBox.setBounds (top.removeFromLeft (100));
     top.removeFromLeft (12);
     latencyLabel.setBounds (top.removeFromLeft (220));
+    top.removeFromLeft (12);
+    prePostToggle.setBounds (top.removeFromLeft (50));
+    top.removeFromLeft (12);
+    resetButton.setBounds (top.removeFromLeft (55));
+    top.removeFromLeft (6);
+    savePresetButton.setBounds (top.removeFromLeft (55));
+    top.removeFromLeft (6);
+    loadPresetButton.setBounds (top.removeFromLeft (55));
 
     creditLabel.setBounds (top);
 

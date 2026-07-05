@@ -9,6 +9,7 @@ struct BandParamIDs
     juce::String freq, gain, q, type, enabled, slope;
     juce::String dynEnabled, dynThreshold, dynRange;
     juce::String autoResonance;
+    juce::String used;
 
     explicit BandParamIDs (int index)
     {
@@ -23,6 +24,12 @@ struct BandParamIDs
         dynThreshold = "band" + p + "_dyn_threshold";
         dynRange     = "band" + p + "_dyn_range";
         autoResonance = "band" + p + "_auto_resonance";
+        // "used" — отдельно от "enabled": помечает, что полоса когда-либо была
+        // активирована кликом по графику (и поэтому её точку нужно показывать,
+        // даже если сейчас Enabled=off). Не тронутые слоты (never clicked)
+        // не показываются на графике вообще. Персистится вместе с остальным
+        // APVTS-состоянием — переживает выкл/вкл полосы и перезапуск хоста.
+        used = "band" + p + "_used";
     }
 };
 
@@ -168,6 +175,20 @@ public:
     juce::CriticalSection fftLock;
 
     void pushNextSampleIntoFifo (float sample);
+
+    // ---- Pre-EQ (вход) спектр для одновременного pre/post отображения ----
+    // Отдельный от resonance-детектора пайплайн (тот заточен под peak-picking,
+    // не под визуальную кривую) и отдельный от post-пайплайна (чтобы не
+    // блокировать/путать его FIFO) — те же fft/window-объекты переиспользуются,
+    // т.к. вызовы происходят последовательно на UI-потоке (SpectrumAnalyzer),
+    // а не параллельно.
+    std::atomic<bool> nextPreFFTBlockReady { false };
+    float preFifoBuffer[fftSize];
+    float preFftData[2 * fftSize];
+    int preFifoIndex = 0;
+    juce::CriticalSection preFftLock;
+
+    void pushNextPreSampleIntoFifo (float sample);
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
